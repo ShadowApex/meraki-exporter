@@ -22,12 +22,16 @@ endif
 
 # Pushes the docker image to our container repository
 .PHONY: push
-push:
+push: login
 	@echo "Pushing image to $(IMAGE_NAME):$(IMAGE_TAG)"
 	docker push $(IMAGE_NAME):$(IMAGE_TAG)
 ifdef GITHUB_TOKEN
 	docker push $(IMAGE_NAME):latest
 endif
+
+.PHONY: login
+login:
+	@echo $(GITHUB_TOKEN) | docker login ghcr.io -u shadowapex --password-stdin
 
 # Publishes a release of the exporter
 .PHONY: release
