@@ -31,17 +31,14 @@ var cfgFile string
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
 	Use:   "meraki-exporter",
-	Short: "A brief description of your application",
-	Long: `A longer description that spans multiple lines and likely contains
-examples and usage of using your application. For example:
-
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
+	Short: "Prometheus exporter for Meraki Cloud",
+	Long: `Provides a prometheus exporter for Meraki Cloud, allowing you to monitor any
+devices and networks in a given account. Requires the MERAKI_KEY env variable
+to be set.`,
 	// Uncomment the following line if your bare application
 	// has an action associated with it:
 	Run: func(cmd *cobra.Command, args []string) {
-		exporter.Run()
+		exporter.Run(9112)
 	},
 }
 

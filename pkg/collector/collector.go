@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"os"
 	"time"
 
@@ -63,6 +64,15 @@ func NewMerakiCollector(config ...func(*MerakiCollectorConfig)) *MerakiCollector
 				"Number of networks in a given organization",
 				[]string{"org"}, nil,
 			)),
+			"applianceDHCPUsed": NewGauge(prometheus.NewDesc("meraki_dhcp_used",
+				"Number of addresses used in DHCP pool",
+				[]string{"org", "network", "subnet", "vlan", "serial"}, nil,
+			)),
+			"applianceDHCPFree": NewGauge(prometheus.NewDesc("meraki_dhcp_free",
+				"Number of free addresses in DHCP pool",
+				[]string{"org", "network", "subnet", "vlan", "serial"}, nil,
+			)),
+
 			"deviceStatus": NewGauge(prometheus.NewDesc("meraki_device_status",
 				"Whether the device is in a good state",
 				[]string{"org", "network", "device", "serial", "model"}, nil,
@@ -73,23 +83,23 @@ func NewMerakiCollector(config ...func(*MerakiCollectorConfig)) *MerakiCollector
 			)),
 			"portEnabled": NewGauge(prometheus.NewDesc("meraki_switch_port_enabled",
 				"Whether the given switch port is enabled",
-				[]string{"org", "network", "switch", "port"}, nil,
+				[]string{"org", "network", "switch", "port", "vlan", "name"}, nil,
 			)),
 			"portIsUplink": NewGauge(prometheus.NewDesc("meraki_switch_port_uplink",
 				"Whether the given switch port is an uplink",
-				[]string{"org", "network", "switch", "port"}, nil,
+				[]string{"org", "network", "switch", "port", "vlan", "name"}, nil,
 			)),
 			"portClientCount": NewGauge(prometheus.NewDesc("meraki_switch_port_client_count",
 				"Number of clients on the given port",
-				[]string{"org", "network", "switch", "port"}, nil,
+				[]string{"org", "network", "switch", "port", "vlan", "name"}, nil,
 			)),
 			"portBytesSent": NewCounter(prometheus.NewDesc("meraki_switch_port_bytes_sent",
 				"Number of bytes sent on the given port",
-				[]string{"org", "network", "switch", "port"}, nil,
+				[]string{"org", "network", "switch", "port", "vlan", "name"}, nil,
 			)),
 			"portBytesRecv": NewCounter(prometheus.NewDesc("meraki_switch_port_bytes_recv",
 				"Number of bytes received on the given port",
-				[]string{"org", "network", "switch", "port"}, nil,
+				[]string{"org", "network", "switch", "port", "vlan", "name"}, nil,
 			)),
 		},
 	}
@@ -104,6 +114,7 @@ func (m *MerakiCollector) Describe(ch chan<- *prometheus.Desc) {
 // This fuction runs when Prometheus scrapes the exporter. It will set a new value for the metric(s)
 // I have no idea how it works, but it does.
 func (m *MerakiCollector) Collect(ch chan<- prometheus.Metric) {
+	log.Println("Collecting metrics")
 	// Fetch all organizations in the Meraki account
 	ctx := context.Background()
 	orgs, err := m.GetOrganizations(ctx)
@@ -155,61 +166,115 @@ func (m *MerakiCollector) collectNetworks(ctx context.Context, ch chan<- prometh
 	// Loop through all networks
 	for networkId, network := range networkByID {
 		networkName := network.GetName()
-		fmt.Println("Network: ", networkName)
-		fmt.Println("NetworkID: ", networkId)
 
 		// Loop through all devices
 		for _, devices := range deviceStatusByNetwork[networkId] {
-			for _, device := range devices {
-				devName := device.GetName()
-				devSerial := device.GetSerial()
-				var status float64 = 1
-				if device.GetStatus() != "online" {
-					status = 0
-				}
-				lastContactStr := device.GetLastReportedAt()
-				lastContact, _ := time.Parse(time.RFC3339Nano, lastContactStr)
-
-				m.metrics["deviceStatus"].Set(ch, status, *org.Name, networkName, devName, devSerial, device.GetModel())
-				m.metrics["deviceLastContact"].Set(ch, float64(lastContact.Unix()), *org.Name, networkName, devName, devSerial, device.GetModel())
-			}
+			m.collectDevices(ctx, ch, org.GetName(), networkName, devices)
 		}
 
-		// Loop through all devices on the network
-		switches := deviceStatusByNetwork[networkId]["switch"]
-		for _, device := range switches {
-			serial := device.GetSerial()
-			devName := serial
-			if name, ok := device.GetNameOk(); ok {
-				devName = *name
-			}
+		// Loop through all appliances on the network
+		if appliances, ok := deviceStatusByNetwork[networkId]["appliance"]; ok {
+			m.collectAppliances(ctx, ch, org.GetName(), networkName, appliances)
+		}
 
-			// Fetch the port statuses for this switch
-			ports, err := m.GetPortsStatus(ctx, serial)
-			if err != nil {
-				fmt.Println("Warning:", err)
-				continue
-			}
+		// Loop through all switches on the network
+		if switches, ok := deviceStatusByNetwork[networkId]["switch"]; ok {
+			m.collectSwitches(ctx, ch, org.GetName(), networkName, switches)
+		}
 
-			// Loop through all switch ports
-			for _, port := range ports {
-				portId := port["portId"].(string)
-				enabled := boolToFloat64(port["enabled"].(bool))
-				isUplink := boolToFloat64(port["isUplink"].(bool))
-				clientCount := port["clientCount"].(float64)
-				usageInKb := port["usageInKb"].(map[string]interface{})
-				sent := usageInKb["sent"].(float64)
-				recv := usageInKb["recv"].(float64)
-
-				m.metrics["portEnabled"].Set(ch, enabled, *org.Name, networkName, devName, portId)
-				m.metrics["portIsUplink"].Set(ch, isUplink, *org.Name, networkName, devName, portId)
-				m.metrics["portClientCount"].Set(ch, clientCount, *org.Name, networkName, devName, portId)
-				m.metrics["portBytesRecv"].Set(ch, recv*1024, *org.Name, networkName, devName, portId)
-				m.metrics["portBytesSent"].Set(ch, sent*1024, *org.Name, networkName, devName, portId)
-			}
+		// Loop through all wireless devices on the network
+		if _, ok := deviceStatusByNetwork[networkId]["wireless"]; ok {
 		}
 	}
+}
 
+// Loop through all devices
+func (m *MerakiCollector) collectDevices(ctx context.Context, ch chan<- prometheus.Metric, org string, networkName string, devices []GetOrganizationDevicesStatuses200Response) {
+	for _, device := range devices {
+		devName := device.GetName()
+		devSerial := device.GetSerial()
+		var status float64 = 1
+		if device.GetStatus() != "online" {
+			status = 0
+		}
+		lastContactStr := device.GetLastReportedAt()
+		lastContact, _ := time.Parse(time.RFC3339Nano, lastContactStr)
+
+		m.metrics["deviceStatus"].Set(ch, status, org, networkName, devName, devSerial, device.GetModel())
+		m.metrics["deviceLastContact"].Set(ch, float64(lastContact.Unix()), org, networkName, devName, devSerial, device.GetModel())
+	}
+}
+
+func (m *MerakiCollector) collectAppliances(ctx context.Context, ch chan<- prometheus.Metric, org string, networkName string, appliances []GetOrganizationDevicesStatuses200Response) {
+	for _, device := range appliances {
+		serial := device.GetSerial()
+		dhcpSubnets, err := m.GetApplianceDHCP(ctx, serial)
+		if err != nil {
+			log.Println("Warning:", err)
+			continue
+		}
+
+		for _, subnet := range dhcpSubnets {
+			net := subnet["subnet"].(string)
+			vlan := fmt.Sprintf("%v", subnet["vlanId"])
+			used := subnet["usedCount"].(float64)
+			free := subnet["freeCount"].(float64)
+
+			m.metrics["applianceDHCPUsed"].Set(ch, used, org, networkName, net, vlan, serial)
+			m.metrics["applianceDHCPFree"].Set(ch, free, org, networkName, net, vlan, serial)
+		}
+	}
+}
+
+func (m *MerakiCollector) collectSwitches(ctx context.Context, ch chan<- prometheus.Metric, org string, networkName string, switches []GetOrganizationDevicesStatuses200Response) {
+	for _, device := range switches {
+		serial := device.GetSerial()
+		devName := serial
+		if name, ok := device.GetNameOk(); ok {
+			devName = *name
+		}
+
+		// Fetch the ports for this switch
+		portsList, err := m.GetSwitchPorts(ctx, serial)
+		if err != nil {
+			log.Println("Warning:", err)
+			continue
+		}
+		ports := map[string]map[string]interface{}{}
+		for _, port := range portsList {
+			portId := port["portId"].(string)
+			ports[portId] = port
+		}
+
+		// Fetch the port statuses for this switch
+		portStatuses, err := m.GetSwitchPortsStatus(ctx, serial)
+		if err != nil {
+			log.Println("Warning:", err)
+			continue
+		}
+
+		// Loop through all switch ports
+		for _, port := range portStatuses {
+			portId := port["portId"].(string)
+			enabled := boolToFloat64(port["enabled"].(bool))
+			isUplink := boolToFloat64(port["isUplink"].(bool))
+			clientCount := port["clientCount"].(float64)
+			usageInKb := port["usageInKb"].(map[string]interface{})
+			sent := usageInKb["sent"].(float64)
+			recv := usageInKb["recv"].(float64)
+			name, _ := ports[portId]["name"].(string)
+			vlan := fmt.Sprintf("%v", ports[portId]["vlan"])
+			if vlan == "<nil>" {
+				vlan = ""
+			}
+
+			m.metrics["portEnabled"].Set(ch, enabled, org, networkName, devName, portId, vlan, name)
+			m.metrics["portIsUplink"].Set(ch, isUplink, org, networkName, devName, portId, vlan, name)
+			m.metrics["portClientCount"].Set(ch, clientCount, org, networkName, devName, portId, vlan, name)
+			m.metrics["portBytesRecv"].Set(ch, recv*1024, org, networkName, devName, portId, vlan, name)
+			m.metrics["portBytesSent"].Set(ch, sent*1024, org, networkName, devName, portId, vlan, name)
+		}
+	}
 }
 
 // Fetch all organizations
@@ -233,8 +298,29 @@ func (m *MerakiCollector) GetNetworks(ctx context.Context, org meraki.GetOrganiz
 	return networks, nil
 }
 
-// GetPortsStatus will return switch port statuses
-func (m *MerakiCollector) GetPortsStatus(ctx context.Context, serial string) ([]map[string]interface{}, error) {
+// https://developer.cisco.com/meraki/api-latest/#!get-device-appliance-dhcp-subnets
+func (m *MerakiCollector) GetApplianceDHCP(ctx context.Context, serial string) ([]map[string]interface{}, error) {
+	req := m.client.ApplianceApi.GetDeviceApplianceDhcpSubnets(ctx, serial)
+	res, _, err := req.Execute()
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// GetSwitchPorts will return switch ports
+// https://developer.cisco.com/meraki/api-latest/#!get-device-switch-ports
+func (m *MerakiCollector) GetSwitchPorts(ctx context.Context, serial string) ([]map[string]interface{}, error) {
+	req := m.client.SwitchApi.GetDeviceSwitchPorts(ctx, serial)
+	ports, _, err := req.Execute()
+	if err != nil {
+		return nil, err
+	}
+	return ports, nil
+}
+
+// GetSwitchPortsStatus will return switch port statuses
+func (m *MerakiCollector) GetSwitchPortsStatus(ctx context.Context, serial string) ([]map[string]interface{}, error) {
 	req := m.client.SwitchApi.GetDeviceSwitchPortsStatuses(ctx, serial)
 	statuses, _, err := req.Execute()
 	if err != nil {

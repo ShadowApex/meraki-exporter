@@ -1,6 +1,8 @@
 package exporter
 
 import (
+	"fmt"
+	"log"
 	"net/http"
 
 	"github.com/ShadowApex/meraki-exporter/pkg/collector"
@@ -8,10 +10,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-func Run() {
+func Run(port int) {
+	listenPort := fmt.Sprintf(":%v", port)
 	merakiCollector := collector.NewMerakiCollector()
 	prometheus.MustRegister(merakiCollector)
 
+	log.Println("Starting exporter on port", listenPort)
 	http.Handle("/metrics", promhttp.Handler())
-	http.ListenAndServe(":9112", nil)
+	http.ListenAndServe(listenPort, nil)
 }
